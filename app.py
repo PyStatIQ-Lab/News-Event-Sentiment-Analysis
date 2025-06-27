@@ -695,8 +695,9 @@ def main():
                             'regulatory_risk': 'Reg Risk',
                             'trend_score': 'Trend Score',
                             'supply_chain_impact': 'Chain Impact'
-                        }).style.applymap(color_confidence, subset=['Confidence'])
-                         .applymap(color_risk, subset=['Reg Risk'])
+                        }).style \
+                         .applymap(color_confidence, subset=['Confidence']) \
+                         .applymap(color_risk, subset=['Reg Risk']) \
                          .applymap(color_trend, subset=['Trend Score'])
         
         # Display table
