@@ -271,9 +271,13 @@ def analyze_supply_chain_impact(sector, events, news_data):
     
     for event_type, date, _ in events:
         # Check for news about related companies around the same time
-        related_events = [item for item in news_data 
-                         if any(scrip['symbol'] in related_companies 
-                         for scrip in item.get('linkedScrips', [])]
+        # CORRECTED LIST COMPREHENSION SYNTAX
+        related_events = [
+            item for item in news_data 
+            if 'linkedScrips' in item and 
+            any(scrip['symbol'] in related_companies 
+                for scrip in item['linkedScrips'])
+        ]
         
         for item in related_events:
             try:
