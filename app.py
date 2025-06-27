@@ -10,10 +10,8 @@ import seaborn as sns
 import plotly.express as px
 import plotly.graph_objects as go
 from wordcloud import WordCloud
-from sklearn.feature_extraction.text import CountVectorizer
 import numpy as np
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.preprocessing import MinMaxScaler
+import pytz  # Required for timezone handling
 import ta  # Technical analysis library
 
 # Configure plot style
@@ -140,23 +138,35 @@ def analyze_stock_news_correlation(events, history):
     if history is None:
         return 0
         
-    # FIX: Correct unpacking of 4 elements per event
+    # Correct unpacking of 4 elements per event
     event_dates = [date for _, date, _, _ in events]
-    event_dates = pd.Series(event_dates, name='event_date')
     prices = history[['Close']].reset_index()
     
     results = []
-    for event_type, date, headline, _ in events:  # FIX: Unpack 4 elements
-        prev_day = date - pd.Timedelta(days=1)
-        next_day = date + pd.Timedelta(days=1)
+    for event_type, date, headline, _ in events:
+        # Convert to date only for comparison
+        event_date = date.date()
         
+        # Find previous trading day
+        prev_days = prices[prices['Date'].dt.date < event_date]
+        if len(prev_days) < 1:
+            continue
+            
+        prev_day = prev_days['Date'].iloc[-1]
         prev_price = prices[prices['Date'] == prev_day]['Close'].values
+        
+        # Find next trading day
+        next_days = prices[prices['Date'].dt.date > event_date]
+        if len(next_days) < 1:
+            continue
+            
+        next_day = next_days['Date'].iloc[0]
         next_price = prices[prices['Date'] == next_day]['Close'].values
         
         if len(prev_price) > 0 and len(next_price) > 0:
             change = ((next_price[0] - prev_price[0]) / prev_price[0]) * 100
             sentiment = compute_sentiment_score(headline)
-            weighted_change = change * (1 + 0.2 * np.sign(sentiment))  # Amplify by sentiment
+            weighted_change = change * (1 + 0.2 * np.sign(sentiment))
             results.append(weighted_change)
     
     if results:
@@ -168,7 +178,7 @@ def detect_event_clusters(events):
     if len(events) < 3:
         return 0
         
-    # FIX: Correct unpacking of 4 elements per event
+    # Extract dates and sort them
     event_dates = sorted([date for _, date, _, _ in events])
     clusters = 0
     i = 0
@@ -182,43 +192,37 @@ def detect_event_clusters(events):
             
     return clusters
 
-# Volume spike analysis - FIXED TIMEZONE HANDLING
+# Volume spike analysis - Simplified approach
 def detect_volume_spikes(events, history):
-    if history is None:
+    if history is None or history.empty:
         return 0
     
     volume_spikes = 0
-    # Ensure the history index is timezone-aware UTC
-    if history.index.tz is None:
-        history = history.tz_localize('UTC')
-    else:
-        history = history.tz_convert('UTC')
-    
-    # Create a copy for safe manipulation
     prices = history[['Volume']].copy()
     prices.reset_index(inplace=True)
     
-    # Convert 'Date' to UTC timezone-aware datetime
-    prices['Date'] = prices['Date'].dt.tz_convert('UTC')
+    # Convert to date for comparison
+    prices['Date'] = prices['Date'].dt.date
     
     for _, date, _, _ in events:
-        # Make event date timezone-aware UTC
-        event_day = date.replace(tzinfo=pytz.UTC)
+        event_date = date.date()
         
+        # Check if event date is in trading data
+        if event_date not in prices['Date'].values:
+            continue
+            
         # Get previous trading days
-        prev_days = prices[prices['Date'] < event_day]
-        
+        prev_days = prices[prices['Date'] < event_date]
         if len(prev_days) < 5:
-            # Not enough history, skip this event
             continue
             
         # Calculate average volume of previous 5 trading days
         avg_volume = prev_days['Volume'].tail(5).mean()
         
         # Get volume on event day
-        event_volume = prices[prices['Date'] == event_day]['Volume'].values
+        event_volume = prices[prices['Date'] == event_date]['Volume'].values[0]
         
-        if len(event_volume) > 0 and event_volume[0] > 1.5 * avg_volume:
+        if event_volume > 1.5 * avg_volume:
             volume_spikes += 1
             
     return volume_spikes
@@ -226,7 +230,6 @@ def detect_volume_spikes(events, history):
 # Regulatory risk scoring
 def regulatory_risk_score(company_news):
     reg_keywords = ["sebi", "rbi", "probe", "penalty", "investigation", "fine", "lawsuit"]
-    # FIX: Correct unpacking of 4 elements per event
     count = sum(1 for _, _, headline, _ in company_news 
                if any(kw in headline.lower() for kw in reg_keywords))
     return min(count * 20, 100)  # Scale to 0-100
@@ -236,56 +239,59 @@ def calculate_trend_score(history, sentiment):
     if history is None or len(history) < 30:
         return 50  # Neutral score
     
-    # Calculate technical indicators
-    history['SMA_20'] = history['Close'].rolling(window=20).mean()
-    history['SMA_50'] = history['Close'].rolling(window=50).mean()
-    
-    # RSI calculation
-    delta = history['Close'].diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    
-    avg_gain = gain.rolling(window=14).mean()
-    avg_loss = loss.rolling(window=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    
-    # MACD calculation
-    ema12 = history['Close'].ewm(span=12, adjust=False).mean()
-    ema26 = history['Close'].ewm(span=26, adjust=False).mean()
-    macd = ema12 - ema26
-    signal = macd.ewm(span=9, adjust=False).mean()
-    
-    # Current values
-    current_rsi = rsi.iloc[-1]
-    macd_diff = macd.iloc[-1] - signal.iloc[-1]
-    
-    # Scoring system
-    score = 50  # Base score
-    
-    # RSI scoring
-    if current_rsi < 30:
-        score += 15  # Oversold - bullish
-    elif current_rsi > 70:
-        score -= 15  # Overbought - bearish
-    
-    # MACD scoring
-    if macd_diff > 0:
-        score += 10
-    else:
-        score -= 10
-    
-    # Moving averages scoring
-    if history['SMA_20'].iloc[-1] > history['SMA_50'].iloc[-1]:
-        score += 10  # Golden cross
-    else:
-        score -= 10  # Death cross
-    
-    # Sentiment adjustment
-    score += sentiment * 5
-    
-    # Ensure score is between 0-100
-    return max(0, min(100, score))
+    try:
+        # Calculate technical indicators
+        history['SMA_20'] = history['Close'].rolling(window=20).mean()
+        history['SMA_50'] = history['Close'].rolling(window=50).mean()
+        
+        # RSI calculation
+        delta = history['Close'].diff()
+        gain = delta.where(delta > 0, 0)
+        loss = -delta.where(delta < 0, 0)
+        
+        avg_gain = gain.rolling(window=14).mean()
+        avg_loss = loss.rolling(window=14).mean()
+        rs = avg_gain / avg_loss
+        rsi = 100 - (100 / (1 + rs))
+        
+        # MACD calculation
+        ema12 = history['Close'].ewm(span=12, adjust=False).mean()
+        ema26 = history['Close'].ewm(span=26, adjust=False).mean()
+        macd = ema12 - ema26
+        signal = macd.ewm(span=9, adjust=False).mean()
+        
+        # Current values
+        current_rsi = rsi.iloc[-1]
+        macd_diff = macd.iloc[-1] - signal.iloc[-1]
+        
+        # Scoring system
+        score = 50  # Base score
+        
+        # RSI scoring
+        if current_rsi < 30:
+            score += 15  # Oversold - bullish
+        elif current_rsi > 70:
+            score -= 15  # Overbought - bearish
+        
+        # MACD scoring
+        if macd_diff > 0:
+            score += 10
+        else:
+            score -= 10
+        
+        # Moving averages scoring
+        if history['SMA_20'].iloc[-1] > history['SMA_50'].iloc[-1]:
+            score += 10  # Golden cross
+        else:
+            score -= 10  # Death cross
+        
+        # Sentiment adjustment
+        score += sentiment * 5
+        
+        # Ensure score is between 0-100
+        return max(0, min(100, score))
+    except Exception as e:
+        return 50  # Return neutral on error
 
 # Supply chain impact analysis
 def analyze_supply_chain_impact(sector, events, news_data):
@@ -295,9 +301,8 @@ def analyze_supply_chain_impact(sector, events, news_data):
     related_companies = SUPPLY_CHAIN[sector]
     impact_score = 0
     
-    for event_type, date, _ in events:
+    for event_type, date, _, _ in events:
         # Check for news about related companies around the same time
-        # CORRECTED LIST COMPREHENSION SYNTAX
         related_events = [
             item for item in news_data 
             if 'linkedScrips' in item and 
@@ -412,16 +417,22 @@ def generate_sector_heatmap(news_data):
                 exchange = scrip['exchange']
                 sector = get_sector(symbol, exchange)
                 if sector != "Unknown":
-                    sectors[sector].append((symbol, exchange))
+                    sectors[sector].append(symbol)
     
     if not sectors:
         return None
     
     # Get sector performance
     sector_perf = {}
-    for sector, companies in sectors.items():
+    for sector, symbols in sectors.items():
         perf = []
-        for symbol, exchange in set(companies):  # Deduplicate
+        for symbol in set(symbols):  # Deduplicate
+            # Get exchange from first occurrence
+            exchange = next((scrip['exchange'] for item in news_data 
+                            if 'linkedScrips' in item 
+                            for scrip in item['linkedScrips'] 
+                            if scrip['symbol'] == symbol), 'nse')
+            
             _, pct_change, _, _ = get_stock_data(symbol, exchange)
             if pct_change is not None:
                 perf.append(pct_change)
@@ -485,16 +496,21 @@ def main():
     col2.metric("Companies Covered", unique_companies)
     
     # Get Nifty and Sensex data
-    nifty = yf.Ticker("^NSEI")
-    nifty_data = nifty.history(period='1d')
-    nifty_change = ((nifty_data['Close'][0] - nifty_data['Open'][0]) / nifty_data['Open'][0]) * 100
+    try:
+        nifty = yf.Ticker("^NSEI")
+        nifty_data = nifty.history(period='1d')
+        nifty_change = ((nifty_data['Close'][0] - nifty_data['Open'][0]) / nifty_data['Open'][0]) * 100
+        col3.metric("Nifty 50", f"{nifty_data['Close'][0]:.2f}", f"{nifty_change:.2f}%")
+    except:
+        col3.metric("Nifty 50", "N/A", "N/A")
     
-    sensex = yf.Ticker("^BSESN")
-    sensex_data = sensex.history(period='1d')
-    sensex_change = ((sensex_data['Close'][0] - sensex_data['Open'][0]) / sensex_data['Open'][0]) * 100
-    
-    col3.metric("Nifty 50", f"{nifty_data['Close'][0]:.2f}", f"{nifty_change:.2f}%")
-    col4.metric("BSE Sensex", f"{sensex_data['Close'][0]:.2f}", f"{sensex_change:.2f}%")
+    try:
+        sensex = yf.Ticker("^BSESN")
+        sensex_data = sensex.history(period='1d')
+        sensex_change = ((sensex_data['Close'][0] - sensex_data['Open'][0]) / sensex_data['Open'][0]) * 100
+        col4.metric("BSE Sensex", f"{sensex_data['Close'][0]:.2f}", f"{sensex_change:.2f}%")
+    except:
+        col4.metric("BSE Sensex", "N/A", "N/A")
     
     # Top row visualizations
     st.subheader("News Analytics")
@@ -564,6 +580,9 @@ def main():
             continue
             
         event_counts = Counter(event_type for event_type, _, _, _ in recent_events)
+        if not event_counts:
+            continue
+            
         most_common = event_counts.most_common(1)[0][0]
         confidence = min(100, event_counts[most_common] * 20)
         
@@ -572,7 +591,7 @@ def main():
             continue
             
         price, pct_change, trend, history = get_stock_data(symbol, exchange)
-        sentiment_avg = np.mean([sent for _, _, _, sent in recent_events])
+        sentiment_avg = np.mean([sent for _, _, _, sent in recent_events]) if recent_events else 0
         
         # Get sector information
         sector = get_sector(symbol, exchange)
@@ -580,7 +599,7 @@ def main():
         # Calculate predictive metrics
         impact = analyze_stock_news_correlation(events, history) if history is not None else 0
         clusters = detect_event_clusters(events)
-        volume_spikes = detect_volume_spikes(events, history)
+        volume_spikes = detect_volume_spikes(events, history) if history is not None else 0
         reg_risk = regulatory_risk_score(events)
         trend_score = calculate_trend_score(history, sentiment_avg)
         event_duration = EVENT_DURATION.get(most_common, "unknown")
@@ -621,28 +640,40 @@ def main():
         df['trend_icon'] = df['price_trend'].map(trend_icons)
         
         # Format columns
-        df['current_price'] = df['current_price'].apply(lambda x: f"₹{x:.2f}" if x else "N/A")
-        df['price_change_pct'] = df['price_change_pct'].apply(lambda x: f"{x:.2f}%" if x else "N/A")
-        df['news_impact_pct'] = df['news_impact_pct'].apply(lambda x: f"{x:.2f}%" if x else "N/A")
-        df['sentiment'] = df['sentiment'].apply(lambda x: f"{x:.1f}")
-        df['supply_chain_impact'] = df['supply_chain_impact'].apply(lambda x: f"{x}%")
+        df['current_price'] = df['current_price'].apply(lambda x: f"₹{x:.2f}" if x and not pd.isna(x) else "N/A")
+        df['price_change_pct'] = df['price_change_pct'].apply(lambda x: f"{x:.2f}%" if x and not pd.isna(x) else "N/A")
+        df['news_impact_pct'] = df['news_impact_pct'].apply(lambda x: f"{x:.2f}%" if x and not pd.isna(x) else "N/A")
+        df['sentiment'] = df['sentiment'].apply(lambda x: f"{x:.1f}" if not pd.isna(x) else "N/A")
+        df['supply_chain_impact'] = df['supply_chain_impact'].apply(lambda x: f"{x}%" if not pd.isna(x) else "N/A")
         
         # Color columns based on values
         def color_confidence(val):
-            color = 'green' if val > 70 else 'orange' if val > 40 else 'red'
-            return f'color: {color}; font-weight: bold'
+            try:
+                val = float(val)
+                color = 'green' if val > 70 else 'orange' if val > 40 else 'red'
+                return f'color: {color}; font-weight: bold'
+            except:
+                return ''
         
         def color_risk(val):
-            color = 'green' if val < 30 else 'orange' if val < 70 else 'red'
-            return f'color: {color}; font-weight: bold'
+            try:
+                val = float(val)
+                color = 'green' if val < 30 else 'orange' if val < 70 else 'red'
+                return f'color: {color}; font-weight: bold'
+            except:
+                return ''
         
         def color_trend(val):
-            if val > 70: return 'background-color: lightgreen'
-            elif val > 50: return 'background-color: lightyellow'
-            else: return 'background-color: #ffcccb'
+            try:
+                val = float(val)
+                if val > 70: return 'background-color: lightgreen'
+                elif val > 50: return 'background-color: lightyellow'
+                else: return 'background-color: #ffcccb'
+            except:
+                return ''
         
-        # Display table
-        st.dataframe(df[['symbol', 'exchange', 'sector', 'predicted_event', 'event_duration',
+        # Create styled dataframe
+        styled_df = df[['symbol', 'exchange', 'sector', 'predicted_event', 'event_duration',
                          'confidence', 'recent_occurrences', 'event_clusters', 'volume_spikes',
                          'current_price', 'price_change_pct', 'trend_icon', 'sentiment',
                          'news_impact_pct', 'regulatory_risk', 'trend_score', 'supply_chain_impact'
@@ -666,27 +697,32 @@ def main():
                             'supply_chain_impact': 'Chain Impact'
                         }).style.applymap(color_confidence, subset=['Confidence'])
                          .applymap(color_risk, subset=['Reg Risk'])
-                         .applymap(color_trend, subset=['Trend Score']),
-                    height=500, use_container_width=True)
+                         .applymap(color_trend, subset=['Trend Score'])
+        
+        # Display table
+        st.dataframe(styled_df, height=500, use_container_width=True)
         
         # Regulatory risk gauge
         st.subheader("Market Regulatory Risk Assessment")
-        avg_reg_risk = df['regulatory_risk'].mean()
-        if not np.isnan(avg_reg_risk):
-            col1, col2 = st.columns([1, 2])
-            with col1:
-                st.plotly_chart(generate_regulatory_gauge(avg_reg_risk), use_container_width=True)
-            with col2:
-                st.markdown("""
-                **Regulatory Risk Interpretation:**
-                - **<30% (Low):** Minimal regulatory concerns
-                - **30-70% (Medium):** Moderate regulatory exposure
-                - **>70% (High):** Significant regulatory challenges
-                
-                Current market average: **{:.1f}%**
-                """.format(avg_reg_risk))
-        else:
-            st.warning("No regulatory risk data available")
+        try:
+            avg_reg_risk = df['regulatory_risk'].mean()
+            if not np.isnan(avg_reg_risk):
+                col1, col2 = st.columns([1, 2])
+                with col1:
+                    st.plotly_chart(generate_regulatory_gauge(avg_reg_risk), use_container_width=True)
+                with col2:
+                    st.markdown(f"""
+                    **Regulatory Risk Interpretation:**
+                    - **<30% (Low):** Minimal regulatory concerns
+                    - **30-70% (Medium):** Moderate regulatory exposure
+                    - **>70% (High):** Significant regulatory challenges
+                    
+                    Current market average: **{avg_reg_risk:.1f}%**
+                    """)
+            else:
+                st.warning("No regulatory risk data available")
+        except:
+            st.warning("Could not calculate regulatory risk")
     else:
         st.warning("No predictions available based on current news data")
     
@@ -696,18 +732,20 @@ def main():
     # Filter options
     col1, col2 = st.columns(2)
     with col1:
+        company_options = sorted(list(set(
+            scrip['symbol'] for item in news_data 
+            if 'linkedScrips' in item 
+            for scrip in item['linkedScrips']
+        )))
         selected_company = st.selectbox("Filter by Company", 
-                                        options=['All'] + sorted(list(set(
-                                            scrip['symbol'] for item in news_data 
-                                            if 'linkedScrips' in item 
-                                            for scrip in item['linkedScrips']
-                                        ))))
+                                        options=['All'] + company_options)
     with col2:
         selected_event = st.selectbox("Filter by Event Type", 
                                      options=['All'] + [et[0] for et in EVENT_TYPES])
     
     # Display news cards
-    for i, item in enumerate(news_data[:10]):  # Show top 10 news items
+    displayed_count = 0
+    for i, item in enumerate(news_data):
         # Apply filters
         if selected_company != 'All':
             if 'linkedScrips' not in item or not any(scrip['symbol'] == selected_company for scrip in item['linkedScrips']):
@@ -718,11 +756,11 @@ def main():
             continue
         
         # Create card
-        with st.expander(f"{item['headline']}", expanded=(i==0)):
+        with st.expander(f"{item['headline']}", expanded=(displayed_count==0)):
             col1, col2 = st.columns([1, 3])
             
             with col1:
-                if 'thumbnailImage' in item and item['thumbnailImage']:
+                if 'thumbnailImage' in item and item['thumbnailImage'] and 'url' in item['thumbnailImage']:
                     st.image(item['thumbnailImage']['url'], width=200)
             
             with col2:
@@ -761,14 +799,24 @@ def main():
                 st.markdown(f"**Sentiment:** <span style='color:{sentiment_color}; font-weight:bold'>{sentiment_text} {sentiment_icon}</span>", 
                             unsafe_allow_html=True)
                 
-                st.write(item['summary'])
+                if 'summary' in item:
+                    st.write(item['summary'])
+                else:
+                    st.write("No summary available")
                 
                 # Show linked companies
                 if 'linkedScrips' in item and item['linkedScrips']:
                     companies = ", ".join(scrip['symbol'] for scrip in item['linkedScrips'])
                     st.markdown(f"**Related Companies:** {companies}")
                 
-                st.markdown(f"[Read full article]({item['contentUrl']})")
+                if 'contentUrl' in item:
+                    st.markdown(f"[Read full article]({item['contentUrl']})")
+                else:
+                    st.write("No article link available")
+        
+        displayed_count += 1
+        if displayed_count >= 10:  # Limit to 10 news items
+            break
 
 if __name__ == "__main__":
     main()
