@@ -182,20 +182,42 @@ def detect_event_clusters(events):
             
     return clusters
 
-# Volume spike analysis
+# Volume spike analysis - FIXED TIMEZONE HANDLING
 def detect_volume_spikes(events, history):
     if history is None:
         return 0
     
     volume_spikes = 0
-    prices = history[['Volume']].reset_index()
+    # Ensure the history index is timezone-aware UTC
+    if history.index.tz is None:
+        history = history.tz_localize('UTC')
+    else:
+        history = history.tz_convert('UTC')
     
-    # FIX: Correct unpacking of 4 elements per event
+    # Create a copy for safe manipulation
+    prices = history[['Volume']].copy()
+    prices.reset_index(inplace=True)
+    
+    # Convert 'Date' to UTC timezone-aware datetime
+    prices['Date'] = prices['Date'].dt.tz_convert('UTC')
+    
     for _, date, _, _ in events:
-        event_day = date
-        avg_volume = prices[prices['Date'] < event_day]['Volume'].tail(5).mean()
+        # Make event date timezone-aware UTC
+        event_day = date.replace(tzinfo=pytz.UTC)
         
+        # Get previous trading days
+        prev_days = prices[prices['Date'] < event_day]
+        
+        if len(prev_days) < 5:
+            # Not enough history, skip this event
+            continue
+            
+        # Calculate average volume of previous 5 trading days
+        avg_volume = prev_days['Volume'].tail(5).mean()
+        
+        # Get volume on event day
         event_volume = prices[prices['Date'] == event_day]['Volume'].values
+        
         if len(event_volume) > 0 and event_volume[0] > 1.5 * avg_volume:
             volume_spikes += 1
             
