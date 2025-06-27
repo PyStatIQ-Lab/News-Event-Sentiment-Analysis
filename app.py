@@ -140,12 +140,13 @@ def analyze_stock_news_correlation(events, history):
     if history is None:
         return 0
         
-    event_dates = [date for _, date, _ in events]
+    # FIX: Correct unpacking of 4 elements per event
+    event_dates = [date for _, date, _, _ in events]
     event_dates = pd.Series(event_dates, name='event_date')
     prices = history[['Close']].reset_index()
     
     results = []
-    for event_type, date, headline in events:
+    for event_type, date, headline, _ in events:  # FIX: Unpack 4 elements
         prev_day = date - pd.Timedelta(days=1)
         next_day = date + pd.Timedelta(days=1)
         
@@ -167,7 +168,8 @@ def detect_event_clusters(events):
     if len(events) < 3:
         return 0
         
-    event_dates = sorted([date for _, date, _ in events])
+    # FIX: Correct unpacking of 4 elements per event
+    event_dates = sorted([date for _, date, _, _ in events])
     clusters = 0
     i = 0
     
@@ -188,7 +190,8 @@ def detect_volume_spikes(events, history):
     volume_spikes = 0
     prices = history[['Volume']].reset_index()
     
-    for _, date, _ in events:
+    # FIX: Correct unpacking of 4 elements per event
+    for _, date, _, _ in events:
         event_day = date
         avg_volume = prices[prices['Date'] < event_day]['Volume'].tail(5).mean()
         
@@ -201,7 +204,8 @@ def detect_volume_spikes(events, history):
 # Regulatory risk scoring
 def regulatory_risk_score(company_news):
     reg_keywords = ["sebi", "rbi", "probe", "penalty", "investigation", "fine", "lawsuit"]
-    count = sum(1 for _, _, headline in company_news 
+    # FIX: Correct unpacking of 4 elements per event
+    count = sum(1 for _, _, headline, _ in company_news 
                if any(kw in headline.lower() for kw in reg_keywords))
     return min(count * 20, 100)  # Scale to 0-100
 
